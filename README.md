@@ -86,3 +86,5 @@ public async Task<float[]> ExtractImageFeatures(byte[] imageBytes)
 - The model is automatically downloaded during the first build
 - Supports both CPU and GPU inference
 - CORS enabled for cross-origin requests
+
+
