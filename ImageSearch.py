@@ -8,7 +8,12 @@ import base64
 import io
 import json
 import warnings
+import logging
 from flask_cors import CORS
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -19,18 +24,31 @@ CORS(app)  # Enable CORS for cross-origin requests
 class CLIPImageSearchModel:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.initialized = False
+        self.error_message = None
+        logger.info(f"Initializing CLIP model on device: {self.device}")
+        
         try:
+            # Create models directory if it doesn't exist
+            os.makedirs("./clip_models", exist_ok=True)
+            
+            # Load model with timeout handling
+            logger.info("Loading CLIP model...")
             self.model, self.preprocess = clip.load("ViT-B/32", device=self.device, download_root="./clip_models")
             self.model.eval()
             self.initialized = True
+            logger.info("CLIP model loaded successfully")
+            
         except Exception as e:
             self.initialized = False
             self.error_message = str(e)
+            logger.error(f"Failed to initialize CLIP model: {e}")
 
     def extract_image_features(self, image_base64):
         if not self.initialized:
             return None, f"Model not initialized: {self.error_message}"
         try:
+            logger.info("Processing image for feature extraction")
             image_data = base64.b64decode(image_base64)
             image = Image.open(io.BytesIO(image_data)).convert('RGB')
             image_input = self.preprocess(image).unsqueeze(0).to(self.device)
@@ -41,6 +59,7 @@ class CLIPImageSearchModel:
             
             return image_features.cpu().numpy().flatten().tolist(), None
         except Exception as e:
+            logger.error(f"Error processing image: {e}")
             return None, f"Error processing image: {str(e)}"
 
     def calculate_similarity(self, features1, features2):
@@ -50,9 +69,11 @@ class CLIPImageSearchModel:
             similarity = np.dot(features1, features2)
             return float(similarity), None
         except Exception as e:
+            logger.error(f"Error calculating similarity: {e}")
             return None, f"Error calculating similarity: {str(e)}"
 
 # Initialize the model globally
+logger.info("Starting model initialization...")
 search_model = CLIPImageSearchModel()
 
 @app.route('/health', methods=['GET'])
@@ -61,13 +82,21 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "model_initialized": search_model.initialized,
-        "device": search_model.device if search_model.initialized else None
+        "device": search_model.device if search_model.initialized else None,
+        "error": search_model.error_message if not search_model.initialized else None
     })
 
 @app.route('/extract', methods=['POST'])
 def extract_features():
     """Extract features from an image"""
     try:
+        # Check if model is initialized
+        if not search_model.initialized:
+            return jsonify({
+                "success": False,
+                "error": f"Model not ready: {search_model.error_message}"
+            }), 503  # Service Unavailable
+        
         data = request.get_json()
         if not data or 'image' not in data:
             return jsonify({
@@ -91,6 +120,7 @@ def extract_features():
             }), 500
 
     except Exception as e:
+        logger.error(f"Unexpected error in extract_features: {e}")
         return jsonify({
             "success": False,
             "error": f"Unexpected error: {str(e)}"
@@ -100,6 +130,13 @@ def extract_features():
 def calculate_similarity():
     """Calculate similarity between two feature vectors"""
     try:
+        # Check if model is initialized
+        if not search_model.initialized:
+            return jsonify({
+                "success": False,
+                "error": f"Model not ready: {search_model.error_message}"
+            }), 503
+        
         data = request.get_json()
         if not data or 'features1' not in data or 'features2' not in data:
             return jsonify({
@@ -124,11 +161,13 @@ def calculate_similarity():
             }), 500
 
     except Exception as e:
+        logger.error(f"Unexpected error in calculate_similarity: {e}")
         return jsonify({
             "success": False,
             "error": f"Unexpected error: {str(e)}"
         }), 500
 
 if __name__ == "__main__":
-    port = int(os.environ["PORT"])  # <-- بدون default
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 8000))  # Add default port
+    logger.info(f"Starting Flask app on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
