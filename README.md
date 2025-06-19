@@ -7,7 +7,6 @@ A Flask API powered by OpenAI's CLIP model for image feature extraction and simi
 - Extract 512-dimensional feature vectors from images
 - Calculate cosine similarity between image features
 - RESTful API endpoints
-- Built-in Gradio interface for testing
 
 ## API Endpoints
 
