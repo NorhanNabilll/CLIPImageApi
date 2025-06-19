@@ -1,3 +1,4 @@
+import gradio as gr
 from flask import Flask, request, jsonify
 import os
 import torch
@@ -9,17 +10,14 @@ import io
 import json
 import warnings
 import logging
-from flask_cors import CORS
+from threading import Thread
+import requests
+from werkzeug.serving import make_server
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Suppress warnings
 warnings.filterwarnings("ignore")
-
-app = Flask(__name__)
-CORS(app)  # Enable CORS for cross-origin requests
 
 class CLIPImageSearchModel:
     def __init__(self):
@@ -29,12 +27,9 @@ class CLIPImageSearchModel:
         logger.info(f"Initializing CLIP model on device: {self.device}")
         
         try:
-            # Create models directory if it doesn't exist
-            os.makedirs("./clip_models", exist_ok=True)
-            
-            # Load model with timeout handling
             logger.info("Loading CLIP model...")
-            self.model, self.preprocess = clip.load("ViT-B/32", device=self.device, download_root="./clip_models")
+            # Load model directly without custom download path for HF Spaces
+            self.model, self.preprocess = clip.load("ViT-B/32", device=self.device)
             self.model.eval()
             self.initialized = True
             logger.info("CLIP model loaded successfully")
@@ -73,12 +68,13 @@ class CLIPImageSearchModel:
             return None, f"Error calculating similarity: {str(e)}"
 
 # Initialize the model globally
-logger.info("Starting model initialization...")
 search_model = CLIPImageSearchModel()
+
+# Flask API setup
+app = Flask(__name__)
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
     return jsonify({
         "status": "healthy",
         "model_initialized": search_model.initialized,
@@ -88,15 +84,13 @@ def health_check():
 
 @app.route('/extract', methods=['POST'])
 def extract_features():
-    """Extract features from an image"""
     try:
-        # Check if model is initialized
         if not search_model.initialized:
             return jsonify({
                 "success": False,
                 "error": f"Model not ready: {search_model.error_message}"
-            }), 503  # Service Unavailable
-        
+            }), 503
+
         data = request.get_json()
         if not data or 'image' not in data:
             return jsonify({
@@ -128,9 +122,7 @@ def extract_features():
 
 @app.route('/similarity', methods=['POST'])
 def calculate_similarity():
-    """Calculate similarity between two feature vectors"""
     try:
-        # Check if model is initialized
         if not search_model.initialized:
             return jsonify({
                 "success": False,
@@ -167,7 +159,80 @@ def calculate_similarity():
             "error": f"Unexpected error: {str(e)}"
         }), 500
 
+# Gradio Interface for testing
+def process_image_demo(image):
+    if image is None:
+        return "Please upload an image"
+    
+    try:
+        # Convert PIL image to base64
+        buffered = io.BytesIO()
+        image.save(buffered, format="JPEG")
+        img_base64 = base64.b64encode(buffered.getvalue()).decode()
+        
+        features, error = search_model.extract_image_features(img_base64)
+        if features:
+            return f"✅ Features extracted successfully!\nFeature vector size: {len(features)}\nFirst 5 values: {features[:5]}"
+        else:
+            return f"❌ Error: {error}"
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+
+# Create Gradio interface
+with gr.Blocks(title="CLIP Image Search API") as demo:
+    gr.Markdown("# CLIP Image Search API")
+    gr.Markdown("This API extracts features from images using CLIP model and calculates similarities.")
+    
+    with gr.Tab("Test Image Processing"):
+        image_input = gr.Image(type="pil", label="Upload Image")
+        process_btn = gr.Button("Process Image")
+        result_output = gr.Textbox(label="Result", lines=5)
+        
+        process_btn.click(
+            fn=process_image_demo,
+            inputs=image_input,
+            outputs=result_output
+        )
+    
+    with gr.Tab("API Endpoints"):
+        gr.Markdown("""
+        ## Available API Endpoints:
+        
+        ### 1. Health Check
+        - **URL**: `/health`
+        - **Method**: GET
+        - **Response**: Model status and device info
+        
+        ### 2. Extract Features
+        - **URL**: `/extract`
+        - **Method**: POST
+        - **Body**: `{"image": "base64_encoded_image"}`
+        - **Response**: `{"success": true, "features": [...], "feature_size": 512}`
+        
+        ### 3. Calculate Similarity
+        - **URL**: `/similarity`
+        - **Method**: POST
+        - **Body**: `{"features1": [...], "features2": [...]}`
+        - **Response**: `{"success": true, "similarity": 0.85}`
+        
+        ### Base URL
+        Your API will be available at: `https://your-space-name-your-username.hf.space`
+        """)
+
+# Run Flask server in a separate thread
+def run_flask():
+    server = make_server('0.0.0.0', 7860, app, threaded=True)
+    server.serve_forever()
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))  # Add default port
-    logger.info(f"Starting Flask app on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # Start Flask server in background
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Launch Gradio interface
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=False,
+        show_api=False
+    )
